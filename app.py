@@ -20,11 +20,11 @@ MODELS = {
     "llama-3.1-8b-instant": {
         "description": "Fast, efficient model for quick responses",
         "category": "General",
-        "token_limit": 8192,
+        "token_limit": 16384,
         "strengths": "Speed, efficiency",
         "best_for": "Quick conversations, basic tasks"
     },
-    "deepseek-r1-distill-qwen-32b": {
+    "deepseek-r1-distill-llama-70b": {
         "description": "Advanced distilled model with excellent performance",
         "category": "Advanced",
         "token_limit": 32768,
@@ -38,12 +38,12 @@ MODELS = {
         "strengths": "Quality, context handling",
         "best_for": "Longer conversations, nuanced responses"
     },
-    "gemma2-9b-it": {
-        "description": "Specialized model for Italian language tasks",
+    "llama-3.3-70b-specdec": {
+        "description": "Speculative decoding-enhanced Llama 3 for faster responses",
         "category": "Specialized",
-        "token_limit": 8192,
-        "strengths": "Italian language processing",
-        "best_for": "Italian content, multilingual tasks"
+        "token_limit": 16384,
+        "strengths": "Speed, English tasks, technical content",
+        "best_for": "Fast English generation, coding assistance"
     },
     "qwen-2.5-coder-32b": {
         "description": "Model optimized for coding tasks",
@@ -57,8 +57,8 @@ MODELS = {
 # Model categories for organization
 MODEL_CATEGORIES = {
     "General": ["llama-3.1-8b-instant"],
-    "Advanced": ["deepseek-r1-distill-qwen-32b", "qwen-2.5-32b"],
-    "Specialized": ["gemma2-9b-it", "qwen-2.5-coder-32b"]
+    "Advanced": ["deepseek-r1-distill-llama-70b", "qwen-2.5-32b"],
+    "Specialized": ["llama-3.3-70b-specdec", "qwen-2.5-coder-32b"]
 }
 
 # System prompts for different conversation modes
@@ -94,7 +94,7 @@ def initialize_session_state():
             "messages_sent": 0,
             "tokens_used": 0,
             "models_used": {},
-            "response_speeds": []  # Store response speeds for analytics
+            "response_speeds": []
         }
     if 'saved_chats' not in st.session_state:
         st.session_state.saved_chats = []
@@ -156,13 +156,8 @@ def handle_user_input(user_question):
         message_container = st.container()
         
         with thinking_placeholder:
-            progress_text = "Processing your request..."
-            progress_bar = st.progress(0)
-            
-            for i in range(100):
-                # Simulate thinking progress
-                progress_bar.progress(i + 1)
-                time.sleep(0.01)  # Faster animation
+            # Use a simpler loading indicator for better performance
+            st.info("Generating response...")
         
         try:
             start_time = time.time()
@@ -203,23 +198,34 @@ def handle_user_input(user_question):
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 'model': st.session_state.model,
                 'response_time': response_time,
-                'response_speed': response_speed  # Add speed to message metadata
+                'response_speed': response_speed
             }
             st.session_state.chat_history.append(message)
             
             # Remove thinking indicator and display response
             thinking_placeholder.empty()
             with message_container:
-                st.write(chatbot_reply)
+                # Apply markdown formatting to improve readability
+                st.markdown(chatbot_reply)
                 
-                # Display response metadata in small text
-                st.caption(f"Model: {st.session_state.model} • Response time: {response_time:.2f}s • Speed: {response_speed:.1f} tokens/sec")
+                # Display response metadata in cleaner format
+                st.caption(f"**{st.session_state.model}** • {response_time:.2f}s • {response_speed:.1f} tokens/sec")
+            
+            # Auto-scroll to bottom after new message
+            st.rerun()
             
         except Exception as e:
             thinking_placeholder.empty()
             with message_container:
-                st.error(f"⚠️ Error: {str(e)}")
-                st.caption("Try adjusting the model or parameters, or check your API key.")
+                error_message = str(e)
+                # Provide more user-friendly error messages
+                if "api_key" in error_message.lower():
+                    error_message = "API key error. Please verify your Groq API key is valid."
+                elif "timeout" in error_message.lower():
+                    error_message = "Request timed out. The model may be experiencing high traffic."
+                
+                st.error(f"⚠️ Error: {error_message}")
+                st.button("Try Again", on_click=lambda: handle_user_input(user_question))
 
 def reset_conversation():
     """Clear conversation history and reset the chat"""
@@ -299,7 +305,7 @@ def export_chat_history(format="json"):
                 "content": msg["human"] if i % 2 == 0 else msg["AI"],
                 "timestamp": msg.get("timestamp", ""),
                 "response_time": msg.get("response_time", ""),
-                "response_speed": msg.get("response_speed", "")  # Include speed in export
+                "response_speed": msg.get("response_speed", "")
             } for i, msg in enumerate(st.session_state.chat_history)]
         }
         return json.dumps(chat_data, indent=2)
@@ -390,8 +396,8 @@ def display_chat_analytics():
 def main():
     # Page configuration
     st.set_page_config(
-        page_title="Advanced Chat Assistant",
-        page_icon="🤖",
+        page_title="Chat Assistant",
+        page_icon="💬",
         layout="wide",
         initial_sidebar_state="expanded"
     )
@@ -399,18 +405,85 @@ def main():
     # Add custom CSS for improved UI
     st.markdown("""
     <style>
-    .main .block-container {padding-top: 2rem; padding-bottom: 2rem;}
-    .stTabs [data-baseweb="tab-panel"] {padding-top: 1rem;}
-    .stSidebar .block-container {padding-top: 2rem;}
+    .main .block-container {
+        padding-top: 1rem;
+        padding-bottom: 6rem;  /* Increased bottom padding for chat input */
+    }
+    .stTabs [data-baseweb="tab-panel"] {
+        padding-top: 0.5rem;
+    }
+    .stSidebar .block-container {
+        padding-top: 1rem;
+    }
+    .stChatMessage {
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+    }
+    .stChatMessage.user {
+        background-color: rgba(240, 242, 246, 0.5);
+    }
+    .stChatMessage.assistant {
+        background-color: rgba(240, 246, 240, 0.5);
+    }
+    
+    /* Chat input styling */
+    .chat-input-container {
+        position: fixed;
+        bottom: 0;
+        left: 25%;
+        right: 0;
+        background: white;
+        z-index: 100;
+        padding: 1rem;
+        box-shadow: 0 -4px 15px rgba(0,0,0,0.08);
+        border-top: 1px solid #e0e0e0;
+        width: 75%;
+    }
+    
+    @media (max-width: 992px) {
+        .chat-input-container {
+            left: 0;
+            width: 100%;
+        }
+    }
+    
+    /* Chat history container */
+    .chat-history {
+        max-height: calc(100vh - 250px);
+        overflow-y: auto;
+        padding-bottom: 100px; /* Space for input */
+    }
+    
+    /* Button styling */
+    .stButton>button {
+        border-radius: 4px;
+        transition: all 0.2s;
+    }
+    .stButton>button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .chat-title {
+        font-size: 1.2rem;
+        font-weight: bold;
+        margin-bottom: 0.5rem;
+    }
+    
+    /* Auto-scroll to bottom */
+    .scroll-to-bottom {
+        max-height: 0;
+        overflow-anchor: none;
+    }
     </style>
     """, unsafe_allow_html=True)
-    
+
     # Initialize session state
     initialize_session_state()
     
     # Create sidebar with tabs
     with st.sidebar:
-        st.title('🔧 Chat Settings')
+        st.title('⚙️ Chat Settings')
         
         tabs = st.tabs(["Models", "Parameters", "Conversation", "Memory", "Saved Chats"])
         
@@ -418,38 +491,42 @@ def main():
         with tabs[0]:
             st.subheader('🔍 Model Selection')
             
-            # Group models by category
+            # Group models by category with cleaner UI
             for category, models in MODEL_CATEGORIES.items():
-                st.markdown(f"**{category} Models**")
-                for model_name in models:
-                    model_info = MODELS[model_name]
-                    if st.button(
-                        f"{model_name}",
-                        help=f"Description: {model_info['description']}\nStrengths: {model_info['strengths']}\nBest for: {model_info['best_for']}", 
-                        key=f"btn_{model_name}",
-                        type="secondary" if st.session_state.model != model_name else "primary"
-                    ):
-                        st.session_state.model = model_name
-                        handle_settings_change()
-                        st.rerun()
-                st.markdown("---")
+                with st.expander(f"**{category} Models**", expanded=(category == "General")):
+                    for model_name in models:
+                        model_info = MODELS[model_name]
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(f"**{model_name}**")
+                            st.caption(f"{model_info['description']}")
+                        with col2:
+                            if st.button(
+                                "Select" if st.session_state.model != model_name else "✓ Active",
+                                key=f"btn_{model_name}",
+                                type="secondary" if st.session_state.model != model_name else "primary",
+                                use_container_width=True
+                            ):
+                                st.session_state.model = model_name
+                                handle_settings_change()
+                                st.rerun()
             
             # Show current model details
-            st.subheader("Current Model Details")
-            current_model = MODELS[st.session_state.model]
-            st.info(f"""
-            **{st.session_state.model}**
-            - **Category**: {current_model['category']}
-            - **Token Limit**: {current_model['token_limit']}
-            - **Strengths**: {current_model['strengths']}
-            - **Best for**: {current_model['best_for']}
-            """)
+            with st.expander("Current Model Details", expanded=True):
+                current_model = MODELS[st.session_state.model]
+                st.info(f"""
+                **{st.session_state.model}**
+                - **Category**: {current_model['category']}
+                - **Token Limit**: {current_model['token_limit']}
+                - **Strengths**: {current_model['strengths']}
+                - **Best for**: {current_model['best_for']}
+                """)
         
         # Parameters tab
         with tabs[1]:
             st.subheader('⚙️ Model Parameters')
             
-            # Temperature slider
+            # Temperature slider with cleaner UI
             temp = st.slider(
                 'Temperature:',
                 0.0, 1.0, value=st.session_state.temperature, step=0.1,
@@ -473,11 +550,12 @@ def main():
         with tabs[2]:
             st.subheader('💬 Conversation Mode')
             
-            # Conversation modes
+            # Conversation modes with better styling
             conversation_mode = st.radio(
                 "Select conversation mode:",
                 list(SYSTEM_PROMPTS.keys()),
-                index=list(SYSTEM_PROMPTS.keys()).index(st.session_state.conversation_mode)
+                index=list(SYSTEM_PROMPTS.keys()).index(st.session_state.conversation_mode),
+                horizontal=True
             )
             
             if conversation_mode != st.session_state.conversation_mode:
@@ -485,17 +563,17 @@ def main():
                 st.session_state.system_prompt = SYSTEM_PROMPTS[conversation_mode]
                 handle_settings_change()
             
-            # Custom system prompt
-            st.subheader("System Prompt")
-            custom_prompt = st.text_area(
-                "Customize system prompt:",
-                value=st.session_state.system_prompt,
-                height=150
-            )
-            
-            if custom_prompt != st.session_state.system_prompt:
-                st.session_state.system_prompt = custom_prompt
-                handle_settings_change()
+            # Custom system prompt in an expander for cleaner UI
+            with st.expander("System Prompt", expanded=False):
+                custom_prompt = st.text_area(
+                    "Customize system prompt:",
+                    value=st.session_state.system_prompt,
+                    height=150
+                )
+                
+                if custom_prompt != st.session_state.system_prompt:
+                    st.session_state.system_prompt = custom_prompt
+                    handle_settings_change()
         
         # Memory tab
         with tabs[3]:
@@ -511,64 +589,78 @@ def main():
                 st.session_state.memory_length = memory_length
                 handle_settings_change()
             
-            # Memory management options
-            st.subheader("Memory Management")
-            
-            # Reset conversation button
-            st.button("🗑️ Reset Conversation", on_click=reset_conversation)
+            # Reset conversation button with confirmation
+            with st.expander("Memory Management", expanded=True):
+                if st.button("🗑️ Reset Conversation", use_container_width=True):
+                    reset_option = st.radio("Are you sure?", ["No", "Yes, reset conversation"])
+                    if reset_option == "Yes, reset conversation":
+                        reset_conversation()
         
         # Saved Chats tab
         with tabs[4]:
             st.subheader('💾 Saved Chats')
             
-            # Chat title input
-            st.session_state.current_chat_title = st.text_input(
+            # Chat title input with better styling
+            st.text_input(
                 "Chat title:",
-                value=st.session_state.current_chat_title
+                value=st.session_state.current_chat_title,
+                key="chat_title_input",
+                on_change=lambda: setattr(st.session_state, 'current_chat_title', st.session_state.chat_title_input)
             )
             
             # Save current chat
-            if st.button("Save Current Chat"):
+            if st.button("💾 Save Current Chat", use_container_width=True):
                 save_current_chat()
             
-            # Load saved chats
+            # Load saved chats with better UI
             if st.session_state.saved_chats:
-                st.subheader("Load Saved Chat")
+                st.divider()
+                st.subheader("Your Saved Chats")
                 for i, chat in enumerate(st.session_state.saved_chats):
-                    if st.button(f"{chat['title']} ({chat['timestamp']})", key=f"load_{i}"):
-                        load_saved_chat(i)
+                    with st.container():
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(f"**{chat['title']}**")
+                            st.caption(f"{chat['timestamp']} • {chat['model']}")
+                        with col2:
+                            if st.button("Load", key=f"load_{i}", use_container_width=True):
+                                load_saved_chat(i)
+                        st.divider()
             else:
                 st.info("No saved chats yet.")
         
         # API key status indicator
-        st.subheader("Status")
-        if groq_api_key:
-            st.success("Connected")
-        else:
-            st.error("❌ Groq API key is missing. Please check your .env file.")
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("API Status:")
+        with col2:
+            if groq_api_key:
+                st.caption("✅ Connected")
+            else:
+                st.caption("❌ API key missing")
         
         # Version information
-        st.markdown("---")
-        st.caption("Advanced Chat Assistant v2.1")  # Updated version number
+        st.caption("Chat Assistant v2.2")
     
     # Main chat interface with tabs
-    main_tabs = st.tabs(["Chat", "Analytics", "Export"])
+    main_tabs = st.tabs(["💬 Chat", "📊 Analytics", "📤 Export"])
     
     # Chat tab
     with main_tabs[0]:
-        st.title("Advanced Chat Assistant 🤖")
-        
-        # Chat header with info
+        # Chat header with info and new chat button
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.markdown(f"**Current Chat**: {st.session_state.current_chat_title}")
-            st.markdown(f"**Model**: {st.session_state.model} • **Mode**: {st.session_state.conversation_mode}")
+            st.title("Chat Assistant 💬")
+            st.caption(f"**Current Chat**: {st.session_state.current_chat_title} | **Model**: {st.session_state.model} | **Mode**: {st.session_state.conversation_mode}")
         with col2:
-            if st.button("New Chat", key="new_chat_btn"):
+            st.write("")  # Spacing
+            st.write("")  # Spacing
+            if st.button("+ New Chat", key="new_chat_btn", use_container_width=True):
                 reset_conversation()
         
         # Divider
-        st.markdown("---")
+        st.divider()
         
         # Initialize conversation if not already done
         if st.session_state.conversation is None:
@@ -580,41 +672,53 @@ def main():
                 st.session_state.max_tokens
             )
         
-        # Chat container with some styling
+        # Chat container with better styling
         chat_container = st.container()
         
         with chat_container:
-            # Improved empty state
-            if not st.session_state.chat_history:
-                st.markdown("""
-                <div style="text-align: center; padding: 50px; color: #888;">
-                    <h3>Start a New Conversation</h3>
-                    <p>Select a model from the sidebar and type your message below.</p>
-                </div>
-                """, unsafe_allow_html=True)
+            # Create a container for chat history with scroll
+            chat_history_container = st.container()
             
-            # Display chat history with improved formatting and speed metrics
-            for i, message in enumerate(st.session_state.chat_history):
-                st.chat_message("user").write(message['human'])
+            with chat_history_container:
+                # Improved empty state with better styling
+                if not st.session_state.chat_history:
+                    st.markdown("""
+                    <div style="text-align: center; padding: 80px 20px; color: #666; background-color: #f9f9f9; border-radius: 10px; margin: 20px 0;">
+                        <h3>Start a New Conversation</h3>
+                        <p>Select a model from the sidebar and type your message below to begin chatting.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                with st.chat_message("assistant"):
-                    st.write(message['AI'])
+                # Display chat history with improved styling
+                for i, message in enumerate(st.session_state.chat_history):
+                    # User message
+                    with st.chat_message("user"):
+                        st.markdown(message['human'])
                     
-                    # Add timestamp, model info, and speed in small text
-                    if 'timestamp' in message:
-                        speed_info = f" • Speed: {message.get('response_speed', 0):.1f} tokens/sec" if 'response_speed' in message else ""
-                        st.caption(f"Model: {message.get('model', st.session_state.model)} • Time: {message.get('response_time', 0):.2f}s{speed_info} • {message.get('timestamp', '')}")
-        
-        # Check API key
-        if not groq_api_key:
-            st.error("❌ Groq API key is missing. Please check your .env file.")
-            return
-        
-        # Chat input
-        st.markdown("---")
-        user_question = st.chat_input("Type your message here...")
-        if user_question:
-            handle_user_input(user_question)
+                    # Assistant message with improved formatting
+                    with st.chat_message("assistant"):
+                        # Apply better formatting for code blocks and lists
+                        st.markdown(message['AI'])
+                        
+                        # Add metadata in a cleaner format
+                        if 'response_time' in message:
+                            speed_info = f"| Speed: {message.get('response_speed', 0):.1f} tokens/sec" if 'response_speed' in message else ""
+                            st.caption(f"**{message.get('model', st.session_state.model)}** | Response time: {message.get('response_time', 0):.2f}s {speed_info}")
+            
+            # Check API key with better error message
+            if not groq_api_key:
+                st.error("⚠️ Groq API key is missing. Please add your API key to the .env file to enable chat functionality.")
+                st.code("GROQ_API_KEY=your_api_key_here", language="bash")
+                return
+            
+            # Chat input container - only shown in the Chat tab
+            with st.container():
+                st.markdown('<div class="chat-input-container">', unsafe_allow_html=True)
+                user_question = st.chat_input("Type your message here...", key="chat_input")
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                if user_question:
+                    handle_user_input(user_question)
     
     # Analytics tab
     with main_tabs[1]:
@@ -624,24 +728,30 @@ def main():
     with main_tabs[2]:
         st.title("Export Conversation")
         
-        export_format = st.radio("Export format:", ["JSON", "Markdown"])
-        
-        if st.button("Generate Export"):
-            format_key = export_format.lower()
-            exported_content = export_chat_history(format_key)
-            
-            if exported_content:
-                st.download_button(
-                    label=f"Download as {export_format}",
-                    data=exported_content,
-                    file_name=f"{st.session_state.current_chat_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.{format_key}",
-                    mime="application/json" if format_key == "json" else "text/markdown"
-                )
+        col1, col2 = st.columns(2)
+        with col1:
+            export_format = st.radio("Export format:", ["JSON", "Markdown"], horizontal=True)
+        with col2:
+            st.write("")  # Spacing
+            if st.button("📥 Generate Export", use_container_width=True):
+                format_key = export_format.lower()
+                exported_content = export_chat_history(format_key)
                 
-                st.text_area("Preview:", exported_content, height=300)
-            else:
-                st.warning("Nothing to export.")
+                if exported_content:
+                    # Offer download
+                    st.download_button(
+                        label=f"💾 Download as {export_format}",
+                        data=exported_content,
+                        file_name=f"{st.session_state.current_chat_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.{format_key}",
+                        mime="application/json" if format_key == "json" else "text/markdown",
+                        use_container_width=True
+                    )
+                    
+                    # Show preview in expandable section
+                    with st.expander("Preview Export Content", expanded=True):
+                        st.text_area("", exported_content, height=300)
+                else:
+                    st.warning("Nothing to export. Start a conversation first.")
 
 if __name__ == "__main__":
     main()
-    
