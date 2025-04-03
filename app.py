@@ -10,10 +10,16 @@ import json
 from datetime import datetime
 import pandas as pd
 import plotly.express as px
+from PIL import Image
+import io
+import requests
+from stability_sdk import client
+import stability_sdk.interfaces.gooseai.generation.generation_pb2 as generation
 
 # Load environment variables
 load_dotenv()
 groq_api_key = os.getenv("GROQ_API_KEY")
+stability_api_key = os.getenv("STABILITY_API_KEY")
 
 # List of supported models with detailed information
 MODELS = {
@@ -51,6 +57,13 @@ MODELS = {
         "token_limit": 32768,
         "strengths": "Code generation, technical knowledge",
         "best_for": "Programming assistance, technical documentation"
+    },
+    "stable-diffusion-xl": {
+        "description": "Stability AI's advanced image generation model",
+        "category": "Image Generation",
+        "token_limit": 0,  # Not applicable for image models
+        "strengths": "High-quality image generation, creative visuals",
+        "best_for": "Generating images from text prompts"
     }
 }
 
@@ -58,7 +71,8 @@ MODELS = {
 MODEL_CATEGORIES = {
     "General": ["llama-3.1-8b-instant"],
     "Advanced": ["deepseek-r1-distill-llama-70b", "qwen-2.5-32b"],
-    "Specialized": ["llama-3.3-70b-specdec", "qwen-2.5-coder-32b"]
+    "Specialized": ["llama-3.3-70b-specdec", "qwen-2.5-coder-32b"],
+    "Image Generation": ["stable-diffusion-xl"]
 }
 
 # System prompts for different conversation modes
@@ -66,7 +80,8 @@ SYSTEM_PROMPTS = {
     "General": "You are a helpful, harmless, and honest AI assistant.",
     "Creative": "You are a creative AI assistant that helps with brainstorming, storytelling, and creative writing. Be imaginative and inspirational in your responses.",
     "Technical": "You are a technical AI assistant that specializes in programming, data analysis, and technical topics. Provide detailed and accurate technical information.",
-    "Concise": "You are a concise AI assistant. Provide brief, to-the-point responses that get straight to the answer without unnecessary elaboration."
+    "Concise": "You are a concise AI assistant. Provide brief, to-the-point responses that get straight to the answer without unnecessary elaboration.",
+    "Multimodal": "You are a multimodal AI assistant that can handle both text and image generation requests. When asked to create images, provide detailed prompts for the image generation model."
 }
 
 def initialize_session_state():
@@ -94,12 +109,25 @@ def initialize_session_state():
             "messages_sent": 0,
             "tokens_used": 0,
             "models_used": {},
-            "response_speeds": []
+            "response_speeds": [],
+            "images_generated": 0
         }
     if 'saved_chats' not in st.session_state:
         st.session_state.saved_chats = []
     if 'current_chat_title' not in st.session_state:
         st.session_state.current_chat_title = f"Chat {len(st.session_state.saved_chats) + 1}"
+    if 'image_generation_params' not in st.session_state:
+        st.session_state.image_generation_params = {
+            "width": 1024,
+            "height": 1024,
+            "steps": 30,
+            "cfg_scale": 7.0,
+            "sampler": "K_DPMPP_2M",
+            "style_preset": None,
+            "seed": None
+        }
+    if 'generated_images' not in st.session_state:
+        st.session_state.generated_images = []
 
 def create_conversation(model, memory_length, system_prompt, temperature, max_tokens):
     """Create a new conversation with the specified parameters"""
@@ -108,6 +136,10 @@ def create_conversation(model, memory_length, system_prompt, temperature, max_to
     # Preload existing chat history into memory
     for message in st.session_state.chat_history:
         memory.save_context({'input': message['human']}, {'output': message['AI']})
+    
+    # Skip LLM initialization for image generation model
+    if model == "stable-diffusion-xl":
+        return None
     
     # Initialize Groq chat model with parameters
     groq_chat = ChatGroq(
@@ -142,6 +174,55 @@ def calculate_response_speed(response_text, response_time):
         return speed
     return 0
 
+def generate_image(prompt, negative_prompt=None):
+    """Generate image using Stability AI's API"""
+    if not stability_api_key:
+        st.error("Stability API key is missing. Please add your API key to the .env file.")
+        return None
+    
+    try:
+        stability_api = client.StabilityInference(
+            key=stability_api_key,
+            verbose=True,
+            engine="stable-diffusion-xl-1024-v1-0"
+        )
+        
+        params = st.session_state.image_generation_params
+        
+        # Prepare the request
+        request = {
+            "prompt": prompt,
+            "width": params["width"],
+            "height": params["height"],
+            "steps": params["steps"],
+            "cfg_scale": params["cfg_scale"],
+            "sampler": getattr(generation, f"SAMPLER_{params['sampler']}"),
+        }
+        
+        # Add optional parameters if they exist
+        if params["style_preset"]:
+            request["style_preset"] = params["style_preset"]
+        if params["seed"]:
+            request["seed"] = params["seed"]
+        if negative_prompt:
+            request["negative_prompt"] = negative_prompt
+        
+        answers = stability_api.generate(**request)
+        
+        for resp in answers:
+            for artifact in resp.artifacts:
+                if artifact.finish_reason == generation.FILTER:
+                    st.warning("Your request activated the API's safety filters and could not be processed.")
+                    return None
+                if artifact.type == generation.ARTIFACT_IMAGE:
+                    img = Image.open(io.BytesIO(artifact.binary))
+                    return img
+        
+        return None
+    except Exception as e:
+        st.error(f"Error generating image: {str(e)}")
+        return None
+
 def handle_user_input(user_question):
     """Process user input and generate response with enhanced error handling and analytics"""
     if not user_question.strip():
@@ -150,13 +231,59 @@ def handle_user_input(user_question):
     # Display user message
     st.chat_message("user").write(user_question)
     
-    # Display thinking indicator
+    # Handle image generation requests
+    if st.session_state.model == "stable-diffusion-xl":
+        with st.chat_message("assistant"):
+            with st.spinner("Generating image..."):
+                start_time = time.time()
+                
+                # Generate the image
+                generated_image = generate_image(user_question)
+                
+                if generated_image:
+                    response_time = time.time() - start_time
+                    
+                    # Save the image to session state
+                    img_bytes = io.BytesIO()
+                    generated_image.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    
+                    # Store image data
+                    image_data = {
+                        "prompt": user_question,
+                        "image": img_bytes.getvalue(),
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "params": st.session_state.image_generation_params.copy()
+                    }
+                    st.session_state.generated_images.append(image_data)
+                    
+                    # Update usage stats
+                    st.session_state.usage_stats["messages_sent"] += 1
+                    st.session_state.usage_stats["images_generated"] += 1
+                    
+                    # Display the image
+                    st.image(generated_image, caption=f"Generated from: '{user_question}'")
+                    
+                    # Save to chat history with metadata
+                    message = {
+                        'human': user_question, 
+                        'AI': "[IMAGE GENERATED]",
+                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'model': st.session_state.model,
+                        'response_time': response_time,
+                        'image_data': image_data
+                    }
+                    st.session_state.chat_history.append(message)
+                    
+                    st.rerun()
+        return
+    
+    # Handle text responses
     with st.chat_message("assistant"):
         thinking_placeholder = st.empty()
         message_container = st.container()
         
         with thinking_placeholder:
-            # Use a simpler loading indicator for better performance
             st.info("Generating response...")
         
         try:
@@ -218,7 +345,6 @@ def handle_user_input(user_question):
             thinking_placeholder.empty()
             with message_container:
                 error_message = str(e)
-                # Provide more user-friendly error messages
                 if "api_key" in error_message.lower():
                     error_message = "API key error. Please verify your Groq API key is valid."
                 elif "timeout" in error_message.lower():
@@ -230,6 +356,7 @@ def handle_user_input(user_question):
 def reset_conversation():
     """Clear conversation history and reset the chat"""
     st.session_state.chat_history = []
+    st.session_state.generated_images = []
     st.session_state.conversation = create_conversation(
         st.session_state.model, 
         st.session_state.memory_length,
@@ -261,7 +388,8 @@ def save_current_chat():
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "model": st.session_state.model,
         "history": st.session_state.chat_history,
-        "system_prompt": st.session_state.system_prompt
+        "system_prompt": st.session_state.system_prompt,
+        "images": st.session_state.generated_images.copy() if st.session_state.model == "stable-diffusion-xl" else []
     }
     
     st.session_state.saved_chats.append(saved_chat)
@@ -275,6 +403,9 @@ def load_saved_chat(chat_index):
     st.session_state.model = saved_chat["model"]
     st.session_state.system_prompt = saved_chat["system_prompt"]
     st.session_state.current_chat_title = saved_chat["title"]
+    
+    if saved_chat["model"] == "stable-diffusion-xl" and "images" in saved_chat:
+        st.session_state.generated_images = saved_chat["images"].copy()
     
     # Recreate conversation with loaded parameters
     st.session_state.conversation = create_conversation(
@@ -308,6 +439,15 @@ def export_chat_history(format="json"):
                 "response_speed": msg.get("response_speed", "")
             } for i, msg in enumerate(st.session_state.chat_history)]
         }
+        
+        # Add image data if available
+        if st.session_state.model == "stable-diffusion-xl" and st.session_state.generated_images:
+            chat_data["images"] = [{
+                "prompt": img["prompt"],
+                "timestamp": img["timestamp"],
+                "params": img["params"]
+            } for img in st.session_state.generated_images]
+        
         return json.dumps(chat_data, indent=2)
     
     elif format == "markdown":
@@ -320,10 +460,19 @@ def export_chat_history(format="json"):
         for msg in st.session_state.chat_history:
             md_content += f"## Human\n\n{msg['human']}\n\n"
             md_content += f"## Assistant\n\n{msg['AI']}\n\n"
-            # Include performance metrics in export
             if 'response_time' in msg and 'response_speed' in msg:
                 md_content += f"*Response time: {msg['response_time']:.2f}s • Speed: {msg['response_speed']:.1f} tokens/sec*\n\n"
             md_content += "---\n\n"
+            
+        # Add image section if available
+        if st.session_state.model == "stable-diffusion-xl" and st.session_state.generated_images:
+            md_content += "## Generated Images\n\n"
+            for img in st.session_state.generated_images:
+                md_content += f"### Image: {img['prompt']}\n\n"
+                md_content += f"*Generated at: {img['timestamp']}*\n\n"
+                md_content += "Parameters:\n```json\n"
+                md_content += json.dumps(img['params'], indent=2)
+                md_content += "\n```\n\n---\n\n"
             
         return md_content
     
@@ -338,6 +487,9 @@ def display_chat_analytics():
     with col1:
         st.metric("Total Messages", st.session_state.usage_stats["messages_sent"])
         st.metric("Estimated Tokens Used", st.session_state.usage_stats["tokens_used"])
+        
+        if st.session_state.model == "stable-diffusion-xl":
+            st.metric("Images Generated", st.session_state.usage_stats["images_generated"])
         
         # Session duration
         current_time = datetime.now()
@@ -393,10 +545,73 @@ def display_chat_analytics():
             )
             st.plotly_chart(fig_time, use_container_width=True)
 
+def display_image_generation_settings():
+    """Display settings for image generation"""
+    st.subheader("Image Generation Settings")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.session_state.image_generation_params["width"] = st.slider(
+            "Width", 512, 2048, st.session_state.image_generation_params["width"], 64,
+            help="Width of the generated image"
+        )
+        
+        st.session_state.image_generation_params["height"] = st.slider(
+            "Height", 512, 2048, st.session_state.image_generation_params["height"], 64,
+            help="Height of the generated image"
+        )
+        
+        st.session_state.image_generation_params["steps"] = st.slider(
+            "Steps", 10, 150, st.session_state.image_generation_params["steps"], 5,
+            help="Number of diffusion steps (more steps = higher quality but slower)"
+        )
+    
+    with col2:
+        st.session_state.image_generation_params["cfg_scale"] = st.slider(
+            "CFG Scale", 1.0, 20.0, st.session_state.image_generation_params["cfg_scale"], 0.5,
+            help="How closely to follow the prompt (higher = more strict)"
+        )
+        
+        st.session_state.image_generation_params["sampler"] = st.selectbox(
+            "Sampler",
+            ["K_DPMPP_2M", "K_DPMPP_2S_ANCESTRAL", "K_DPM_2", "K_DPM_2_ANCESTRAL", "K_EULER", "K_EULER_ANCESTRAL"],
+            index=["K_DPMPP_2M", "K_DPMPP_2S_ANCESTRAL", "K_DPM_2", "K_DPM_2_ANCESTRAL", "K_EULER", "K_EULER_ANCESTRAL"].index(
+                st.session_state.image_generation_params["sampler"]
+            ),
+            help="Diffusion sampler method"
+        )
+        
+        st.session_state.image_generation_params["style_preset"] = st.selectbox(
+            "Style Preset (optional)",
+            [None, "3d-model", "analog-film", "anime", "cinematic", "comic-book", 
+             "digital-art", "enhance", "fantasy-art", "isometric", "line-art", 
+             "low-poly", "modeling-compound", "neon-punk", "origami", 
+             "photographic", "pixel-art", "tile-texture"],
+            index=0,
+            help="Predefined style to apply to the image"
+        )
+    
+    seed_col1, seed_col2 = st.columns([3, 1])
+    with seed_col1:
+        seed_input = st.number_input(
+            "Seed (optional)",
+            min_value=0,
+            max_value=2147483647,
+            value=st.session_state.image_generation_params["seed"] or 0,
+            help="Random seed for reproducibility (0 = random)"
+        )
+        st.session_state.image_generation_params["seed"] = seed_input if seed_input != 0 else None
+    
+    with seed_col2:
+        if st.button("Random Seed", use_container_width=True):
+            st.session_state.image_generation_params["seed"] = None
+            st.rerun()
+
 def main():
     # Page configuration
     st.set_page_config(
-        page_title="Chat Assistant",
+        page_title="Multimodal Chat Assistant",
         page_icon="💬",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -407,7 +622,7 @@ def main():
     <style>
     .main .block-container {
         padding-top: 1rem;
-        padding-bottom: 6rem;  /* Increased bottom padding for chat input */
+        padding-bottom: 6rem;
     }
     .stTabs [data-baseweb="tab-panel"] {
         padding-top: 0.5rem;
@@ -426,8 +641,6 @@ def main():
     .stChatMessage.assistant {
         background-color: rgba(240, 246, 240, 0.5);
     }
-    
-    /* Chat input styling */
     .chat-input-container {
         position: fixed;
         bottom: 0;
@@ -440,22 +653,17 @@ def main():
         border-top: 1px solid #e0e0e0;
         width: 75%;
     }
-    
     @media (max-width: 992px) {
         .chat-input-container {
             left: 0;
             width: 100%;
         }
     }
-    
-    /* Chat history container */
     .chat-history {
         max-height: calc(100vh - 250px);
         overflow-y: auto;
-        padding-bottom: 100px; /* Space for input */
+        padding-bottom: 100px;
     }
-    
-    /* Button styling */
     .stButton>button {
         border-radius: 4px;
         transition: all 0.2s;
@@ -469,11 +677,29 @@ def main():
         font-weight: bold;
         margin-bottom: 0.5rem;
     }
-    
-    /* Auto-scroll to bottom */
     .scroll-to-bottom {
         max-height: 0;
         overflow-anchor: none;
+    }
+    .image-gallery {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 1rem;
+        margin-top: 1rem;
+    }
+    .image-card {
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 0.5rem;
+    }
+    .image-card img {
+        width: 100%;
+        border-radius: 4px;
+    }
+    .image-prompt {
+        font-size: 0.9rem;
+        margin-top: 0.5rem;
+        color: #555;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -526,25 +752,28 @@ def main():
         with tabs[1]:
             st.subheader('⚙️ Model Parameters')
             
-            # Temperature slider with cleaner UI
-            temp = st.slider(
-                'Temperature:',
-                0.0, 1.0, value=st.session_state.temperature, step=0.1,
-                help="Higher values make output more random, lower values more deterministic"
-            )
-            if temp != st.session_state.temperature:
-                st.session_state.temperature = temp
-                handle_settings_change()
-            
-            # Max tokens slider
-            max_tokens = st.slider(
-                'Max Output Tokens:',
-                100, 4000, value=st.session_state.max_tokens, step=100,
-                help="Maximum number of tokens in the response"
-            )
-            if max_tokens != st.session_state.max_tokens:
-                st.session_state.max_tokens = max_tokens
-                handle_settings_change()
+            if st.session_state.model == "stable-diffusion-xl":
+                display_image_generation_settings()
+            else:
+                # Temperature slider with cleaner UI
+                temp = st.slider(
+                    'Temperature:',
+                    0.0, 1.0, value=st.session_state.temperature, step=0.1,
+                    help="Higher values make output more random, lower values more deterministic"
+                )
+                if temp != st.session_state.temperature:
+                    st.session_state.temperature = temp
+                    handle_settings_change()
+                
+                # Max tokens slider
+                max_tokens = st.slider(
+                    'Max Output Tokens:',
+                    100, 4000, value=st.session_state.max_tokens, step=100,
+                    help="Maximum number of tokens in the response"
+                )
+                if max_tokens != st.session_state.max_tokens:
+                    st.session_state.max_tokens = max_tokens
+                    handle_settings_change()
         
         # Conversation tab
         with tabs[2]:
@@ -579,22 +808,21 @@ def main():
         with tabs[3]:
             st.subheader('🧠 Memory Settings')
             
-            memory_length = st.slider(
-                'Conversation memory (messages):',
-                1, 20, value=st.session_state.memory_length,
-                help="Number of previous messages to remember"
-            )
-            
-            if memory_length != st.session_state.memory_length:
-                st.session_state.memory_length = memory_length
-                handle_settings_change()
+            if st.session_state.model != "stable-diffusion-xl":
+                memory_length = st.slider(
+                    'Conversation memory (messages):',
+                    1, 20, value=st.session_state.memory_length,
+                    help="Number of previous messages to remember"
+                )
+                
+                if memory_length != st.session_state.memory_length:
+                    st.session_state.memory_length = memory_length
+                    handle_settings_change()
             
             # Reset conversation button with confirmation
             with st.expander("Memory Management", expanded=True):
                 if st.button("🗑️ Reset Conversation", use_container_width=True):
-                    reset_option = st.radio("Are you sure?", ["No", "Yes, reset conversation"])
-                    if reset_option == "Yes, reset conversation":
-                        reset_conversation()
+                    reset_conversation()
         
         # Saved Chats tab
         with tabs[4]:
@@ -635,23 +863,29 @@ def main():
         with col1:
             st.caption("API Status:")
         with col2:
+            status = []
             if groq_api_key:
-                st.caption("✅ Connected")
+                status.append("✅ Groq")
+            if stability_api_key:
+                status.append("✅ Stability")
+            
+            if not status:
+                st.caption("❌ No API keys")
             else:
-                st.caption("❌ API key missing")
+                st.caption(", ".join(status))
         
         # Version information
-        st.caption("Chat Assistant v2.2")
+        st.caption("Multimodal Chat Assistant v3.0")
     
     # Main chat interface with tabs
-    main_tabs = st.tabs(["💬 Chat", "📊 Analytics", "📤 Export"])
+    main_tabs = st.tabs(["💬 Chat", "🖼️ Gallery", "📊 Analytics", "📤 Export"])
     
     # Chat tab
     with main_tabs[0]:
         # Chat header with info and new chat button
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.title("Chat Assistant 💬")
+            st.title("Multimodal Chat Assistant 💬")
             st.caption(f"**Current Chat**: {st.session_state.current_chat_title} | **Model**: {st.session_state.model} | **Mode**: {st.session_state.conversation_mode}")
         with col2:
             st.write("")  # Spacing
@@ -663,7 +897,7 @@ def main():
         st.divider()
         
         # Initialize conversation if not already done
-        if st.session_state.conversation is None:
+        if st.session_state.conversation is None and st.session_state.model != "stable-diffusion-xl":
             st.session_state.conversation = create_conversation(
                 st.session_state.model, 
                 st.session_state.memory_length,
@@ -697,18 +931,28 @@ def main():
                     
                     # Assistant message with improved formatting
                     with st.chat_message("assistant"):
-                        # Apply better formatting for code blocks and lists
-                        st.markdown(message['AI'])
-                        
-                        # Add metadata in a cleaner format
-                        if 'response_time' in message:
-                            speed_info = f"| Speed: {message.get('response_speed', 0):.1f} tokens/sec" if 'response_speed' in message else ""
-                            st.caption(f"**{message.get('model', st.session_state.model)}** | Response time: {message.get('response_time', 0):.2f}s {speed_info}")
+                        # Handle image responses
+                        if 'image_data' in message:
+                            st.image(message['image_data']['image'], caption=f"Generated from: '{message['human']}'")
+                            st.caption(f"**{message.get('model', st.session_state.model)}** • Response time: {message.get('response_time', 0):.2f}s")
+                        else:
+                            # Apply better formatting for text responses
+                            st.markdown(message['AI'])
+                            
+                            # Add metadata in a cleaner format
+                            if 'response_time' in message:
+                                speed_info = f"| Speed: {message.get('response_speed', 0):.1f} tokens/sec" if 'response_speed' in message else ""
+                                st.caption(f"**{message.get('model', st.session_state.model)}** | Response time: {message.get('response_time', 0):.2f}s {speed_info}")
             
             # Check API key with better error message
-            if not groq_api_key:
+            if not groq_api_key and st.session_state.model != "stable-diffusion-xl":
                 st.error("⚠️ Groq API key is missing. Please add your API key to the .env file to enable chat functionality.")
                 st.code("GROQ_API_KEY=your_api_key_here", language="bash")
+                return
+            
+            if st.session_state.model == "stable-diffusion-xl" and not stability_api_key:
+                st.error("⚠️ Stability API key is missing. Please add your API key to the .env file to enable image generation.")
+                st.code("STABILITY_API_KEY=your_api_key_here", language="bash")
                 return
             
             # Chat input container - only shown in the Chat tab
@@ -720,12 +964,41 @@ def main():
                 if user_question:
                     handle_user_input(user_question)
     
-    # Analytics tab
+    # Gallery tab (for image generation)
     with main_tabs[1]:
+        if st.session_state.model == "stable-diffusion-xl":
+            st.title("Generated Images Gallery")
+            
+            if st.session_state.generated_images:
+                st.markdown(f"**{len(st.session_state.generated_images)} images generated in this session**")
+                
+                # Display images in a responsive grid
+                st.markdown('<div class="image-gallery">', unsafe_allow_html=True)
+                
+                for img_data in reversed(st.session_state.generated_images):
+                    with st.container():
+                        st.markdown(f'<div class="image-card">', unsafe_allow_html=True)
+                        st.image(img_data['image'], use_column_width=True)
+                        st.markdown(f'<div class="image-prompt">Prompt: {img_data["prompt"]}</div>', unsafe_allow_html=True)
+                        
+                        # Show parameters on hover or in expander
+                        with st.expander("Generation Parameters"):
+                            st.json(img_data['params'])
+                        
+                        st.markdown('</div>', unsafe_allow_html=True)
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.info("No images generated yet. Switch to the Chat tab and use the Stable Diffusion XL model to generate images.")
+        else:
+            st.info("Image gallery is only available when using the Stable Diffusion XL model. Switch models in the sidebar.")
+    
+    # Analytics tab
+    with main_tabs[2]:
         display_chat_analytics()
     
     # Export tab
-    with main_tabs[2]:
+    with main_tabs[3]:
         st.title("Export Conversation")
         
         col1, col2 = st.columns(2)
