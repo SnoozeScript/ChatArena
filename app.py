@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 from langchain.chains import ConversationChain
-from langchain.chains.conversation.memory import ConversationBufferWindowMemory
+from langchain.memory import ConversationBufferWindowMemory
 from langchain_groq import ChatGroq
 from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
@@ -167,7 +167,11 @@ def initialize_session_state():
 def create_conversation(model: str, memory_length: int, system_prompt: str, 
                       temperature: float, max_tokens: int) -> Optional[ConversationChain]:
     """Create a new conversation with the specified parameters"""
-    memory = ConversationBufferWindowMemory(k=memory_length)
+    memory = ConversationBufferWindowMemory(
+        memory_key="history",
+        input_key="input",
+        k=memory_length
+    )
     
     # Preload existing chat history into memory
     for message in st.session_state.chat_history:
